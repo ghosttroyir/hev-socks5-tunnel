@@ -11,88 +11,36 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up NDK
-        uses: nttld/setup-ndk@v1
+      - name: Set up Java
+        uses: actions/setup-java@v5
         with:
-          ndk-version: r26d
+          java-version: '21'
+          distribution: 'temurin'
 
-      - name: Prepare JNI bridge source
+      - name: Download NDK
         run: |
-          cat > hev-jni.c <<'EOF'
-          #include <jni.h>
-          #include "hev-main.h"
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          ln -sf . jni
 
-          JNIEXPORT jint JNICALL
-          Java_com_vayachilles_vpn0_HevTunnel_startTunnel (JNIEnv *env, jobject thiz,
-                      jint fd, jstring jconf)
-          {
-              const char *conf;
-              jint res;
-              conf = (*env)->GetStringUTFChars (env, jconf, NULL);
-              if (NULL == conf)
-                  return -1000;
-              res = (jint) hev_socks5_tunnel_main_from_file (conf, (int) fd);
-              (*env)->ReleaseStringUTFChars (env, jconf, conf);
-              return res;
-          }
-
-          JNIEXPORT void JNICALL
-          Java_com_vayachilles_vpn0_HevTunnel_stopTunnel (JNIEnv *env, jobject thiz)
-          {
-              hev_socks5_tunnel_quit ();
-          }
-          EOF
-          cat > logstub.c <<'EOF'
-          #include <stdarg.h>
-          int __android_log_print (int p, const char *t, const char *f, ...) { (void)p;(void)t;(void)f; return 0; }
-          int __android_log_vprint (int p, const char *t, const char *f, va_list a) { (void)p;(void)t;(void)f;(void)a; return 0; }
-          void __android_log_write (int p, const char *t, const char *x) { (void)p;(void)t;(void)x; }
-          void __android_log_buf_write (int b, int p, const char *t, const char *x) { (void)b;(void)p;(void)t;(void)x; }
-          EOF
-
-      - name: Build with NDK (fPIC wrapper)
+      - name: Build android-so (official ndk-build)
         run: |
-          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          # fd_set: bionic يوفره أصلاً — نُبطل تعريف lwip المتعارض
-          find third-part/lwip -name cc.h -exec sed -i 's|typedef __kernel_fd_set fd_set;|/* fd_set: provided by bionic */|' {} +
-          # -lpthread غير موجودة في bionic — نحذفها من الربط
-          sed -i 's/-lpthread//g' Makefile
-          # ⬇️ إصلاح: امسح SYNC_STOP قبل فحص run (تشغيلات متتالية بنفس العملية) ⬇️
-          sed -i 's|if (atomic_fetch_and (&tsync, ~SYNC_STOP) & SYNC_STOP)|LOG_D ("RUN-CHECK");\n    atomic_fetch_and (\&tsync, ~SYNC_STOP);\n    if (atomic_fetch_and (\&tsync, ~SYNC_STOP) \& SYNC_STOP)|' src/hev-socks5-tunnel.c
-          # ⬇️ بصمات: هل وصلنا للمجدول؟ وهل عاد فوراً؟ ⬇️
-          sed -i 's|WRITE_ONCE (run, 1);|WRITE_ONCE (run, 1);\n    LOG_D ("SCHED-ENTER");|' src/hev-socks5-tunnel.c
-          sed -i 's|hev_task_system_run ();|hev_task_system_run ();\n    LOG_D ("SCHED-EXIT");|' src/hev-socks5-tunnel.c
-          # ⬇️ غلاف المترجم بمسار مطلق — يحقن -fPIC في كل استدعاء ⬇️
-          printf '#!/bin/bash\nexec %s -fPIC "$@"\n' "$NDKBIN/aarch64-linux-android24-clang" > "$HOME/clang-pic"
-          chmod +x "$HOME/clang-pic"
-          make clean
-          make CC="$HOME/clang-pic" STRIP=true
+          ./android-ndk-r27d/ndk-build APP_MODULES=hev-socks5-tunnel -j$(nproc)
+          find libs -name "*.so" | head -10
+          ls -lh libs/arm64-v8a/
 
-      - name: Link as shared library
+      - name: Locate and prepare library
         run: |
-          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          CC=$NDKBIN/aarch64-linux-android24-clang
-          $CC -fPIC -O2 -Isrc -c hev-jni.c -o hev-jni.o
-          $CC -fPIC -O2 -c logstub.c -o logstub.o
-          OBJS=$(find build -name '*.o' ! -name 'main.o' | tr '\n' ' ')
-          echo "objects: $(echo $OBJS | wc -w)"
-          $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS \
-            third-part/lwip/bin/liblwip.a \
-            third-part/yaml/bin/libyaml.a \
-            third-part/hev-task-system/bin/libhev-task-system.a \
-            -lm -llog
-          ls -lh libhev.so
+          # المكتبة الرسمية: libs/arm64-v8a/libhev-socks5-tunnel.so
+          SRC=$(find libs -name "*.so" -path "*arm64*" | head -1)
+          echo "Source: $SRC"
+          ls -lh "$SRC"
+          # تحقق من الرموز المصدَّرة
+          ./android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm -D "$SRC" | grep -E "hev_socks5_tunnel_main_from_file|hev_socks5_tunnel_quit|Java_" || echo "NO JNI SYMBOLS"
+          # ننسخها باسم libhev.so (الاسم الذي يحمّله تطبيقنا)
           mkdir -p out
-          cp libhev.so out/
-
-      - name: Verify JNI symbols
-        run: |
-          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          $NDKBIN/llvm-nm -D libhev.so | grep Java_
-
-      - name: Verify diagnostics applied
-        run: |
-          grep -n "RUN-CHECK\|SCHED-ENTER\|SCHED-EXIT" src/hev-socks5-tunnel.c
+          cp "$SRC" out/libhev.so
+          ls -lh out/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
