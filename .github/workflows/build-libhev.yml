@@ -56,9 +56,12 @@ jobs:
           CC=$NDKBIN/aarch64-linux-android24-clang
           # fd_set: bionic يوفره أصلاً — نُبطل تعريف lwip المتعارض
           find third-part/lwip -name cc.h -exec sed -i 's|typedef __kernel_fd_set fd_set;|/* fd_set: provided by bionic */|' {} +
+          # -fPIC لكل Makefiles (الرئيسي + lwip + yaml + task-system)
+          find . -name Makefile -exec sed -i 's/-O2/-O2 -fPIC/g' {} +
+          # -lpthread غير موجودة في bionic (pthread داخل libc) — نحذفها من الربط
+          sed -i 's/-lpthread//g' Makefile
           make clean
-          # -lpthread غير موجودة في bionic (pthread داخل libc) — نلغيها من الربط
-          make CC="$CC" CFLAGS="-O2 -fPIC" LDFLAGS="-lpthread=" LDLIBS=""
+          make CC="$CC"
 
       - name: Link as shared library
         run: |
@@ -66,8 +69,15 @@ jobs:
           CC=$NDKBIN/aarch64-linux-android24-clang
           $CC -fPIC -O2 -Isrc -c hev-jni.c -o hev-jni.o
           $CC -fPIC -O2 -c logstub.c -o logstub.o
-          OBJS=$(find . -name '*.o' ! -name 'main.o' ! -name 'hev-jni.o' ! -name 'logstub.o' | tr '\n' ' ')
-          $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS -lm -llog
+          OBJS=$(find build -name '*.o' ! -name 'main.o' | tr '\n' ' ')
+          echo "objects: $(echo $OBJS | wc -w)"
+          ls -l third-part/lwip/bin/liblwip.a third-part/yaml/bin/libyaml.a third-part/hev-task-system/bin/libhev-task-system.a
+          # الربط بالأرشيفات الرسمية — كما يفعل Makefile الرسمي (صفر تكرارات)
+          $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS \
+            third-part/lwip/bin/liblwip.a \
+            third-part/yaml/bin/libyaml.a \
+            third-part/hev-task-system/bin/libhev-task-system.a \
+            -lm -llog
           ls -lh libhev.so
           mkdir -p out
           cp libhev.so out/
