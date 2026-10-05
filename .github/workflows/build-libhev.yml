@@ -16,14 +16,7 @@ jobs:
         with:
           ndk-version: r26d
 
-      - name: Build with NDK (fPIC)
-        run: |
-          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          CC=$NDKBIN/aarch64-linux-android24-clang
-          make clean
-          make CC="$CC" CFLAGS="-O2 -fPIC"
-
-      - name: Write JNI bridge
+      - name: Prepare JNI bridge source
         run: |
           cat > hev-jni.c <<'EOF'
           #include <jni.h>
@@ -57,7 +50,16 @@ jobs:
           void __android_log_buf_write (int b, int p, const char *t, const char *x) { (void)b;(void)p;(void)t;(void)x; }
           EOF
 
-      - name: Link shared library
+      - name: Build with NDK (fPIC)
+        run: |
+          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$NDKBIN/aarch64-linux-android24-clang
+          # fd_set: bionic يوفره أصلاً — نُبطل تعريف lwip المتعارض
+          find third-part/lwip -name cc.h -exec sed -i 's|typedef __kernel_fd_set fd_set;|/* fd_set: provided by bionic */|' {} +
+          make clean
+          make CC="$CC" CFLAGS="-O2 -fPIC"
+
+      - name: Link as shared library
         run: |
           NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
           CC=$NDKBIN/aarch64-linux-android24-clang
