@@ -1,0 +1,81 @@
+name: build-libhev
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Build with NDK (fPIC)
+        run: |
+          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$NDKBIN/aarch64-linux-android24-clang
+          make clean
+          make CC="$CC" CFLAGS="-O2 -fPIC"
+
+      - name: Write JNI bridge
+        run: |
+          cat > hev-jni.c <<'EOF'
+          #include <jni.h>
+          #include "hev-main.h"
+
+          JNIEXPORT jint JNICALL
+          Java_com_vayachilles_vpn0_HevTunnel_startTunnel (JNIEnv *env, jobject thiz,
+                      jint fd, jstring jconf)
+          {
+              const char *conf;
+              jint res;
+              conf = (*env)->GetStringUTFChars (env, jconf, NULL);
+              if (NULL == conf)
+                  return -1000;
+              res = (jint) hev_socks5_tunnel_main_from_file (conf, (int) fd);
+              (*env)->ReleaseStringUTFChars (env, jconf, conf);
+              return res;
+          }
+
+          JNIEXPORT void JNICALL
+          Java_com_vayachilles_vpn0_HevTunnel_stopTunnel (JNIEnv *env, jobject thiz)
+          {
+              hev_socks5_tunnel_quit ();
+          }
+          EOF
+          cat > logstub.c <<'EOF'
+          #include <stdarg.h>
+          int __android_log_print (int p, const char *t, const char *f, ...) { (void)p;(void)t;(void)f; return 0; }
+          int __android_log_vprint (int p, const char *t, const char *f, va_list a) { (void)p;(void)t;(void)f;(void)a; return 0; }
+          void __android_log_write (int p, const char *t, const char *x) { (void)p;(void)t;(void)x; }
+          void __android_log_buf_write (int b, int p, const char *t, const char *x) { (void)b;(void)p;(void)t;(void)x; }
+          EOF
+
+      - name: Link shared library
+        run: |
+          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$NDKBIN/aarch64-linux-android24-clang
+          $CC -fPIC -O2 -Isrc -c hev-jni.c -o hev-jni.o
+          $CC -fPIC -O2 -c logstub.c -o logstub.o
+          OBJS=$(find . -name '*.o' ! -name 'main.o' ! -name 'hev-jni.o' ! -name 'logstub.o' | tr '\n' ' ')
+          $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS -lm -llog
+          ls -lh libhev.so
+          mkdir -p out
+          cp libhev.so out/
+
+      - name: Verify JNI symbols
+        run: |
+          NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          $NDKBIN/llvm-nm -D libhev.so | grep Java_
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhev-android
+          path: out/libhev.so
