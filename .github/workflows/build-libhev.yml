@@ -21,29 +21,63 @@ jobs:
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
           unzip -q android-ndk-r27d-linux.zip
-          ln -sf . jni
 
-      - name: Build android-so (official ndk-build)
+      - name: Build official android-so
         run: |
           ./android-ndk-r27d/ndk-build APP_MODULES=hev-socks5-tunnel -j$(nproc)
-          find libs -name "*.so" | head -10
           ls -lh libs/arm64-v8a/
 
-      - name: Locate and prepare library
+      - name: Write JNI bridge source
         run: |
-          # المكتبة الرسمية: libs/arm64-v8a/libhev-socks5-tunnel.so
-          SRC=$(find libs -name "*.so" -path "*arm64*" | head -1)
-          echo "Source: $SRC"
-          ls -lh "$SRC"
-          # تحقق من الرموز المصدَّرة
-          ./android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm -D "$SRC" | grep -E "hev_socks5_tunnel_main_from_file|hev_socks5_tunnel_quit|Java_" || echo "NO JNI SYMBOLS"
-          # ننسخها باسم libhev.so (الاسم الذي يحمّله تطبيقنا)
+          cat > hev-jni.c <<'EOF'
+          #include <jni.h>
+          #include "hev-main.h"
+
+          JNIEXPORT jint JNICALL
+          Java_com_vayachilles_vpn0_HevTunnel_startTunnel (JNIEnv *env, jobject thiz,
+                      jint fd, jstring jconf)
+          {
+              const char *conf;
+              jint res;
+              conf = (*env)->GetStringUTFChars (env, jconf, NULL);
+              if (NULL == conf)
+                  return -1000;
+              res = (jint) hev_socks5_tunnel_main_from_file (conf, (int) fd);
+              (*env)->ReleaseStringUTFChars (env, jconf, conf);
+              return res;
+          }
+
+          JNIEXPORT void JNICALL
+          Java_com_vayachilles_vpn0_HevTunnel_stopTunnel (JNIEnv *env, jobject thiz)
+          {
+              hev_socks5_tunnel_quit ();
+          }
+          EOF
+          cat > logstub.c <<'EOF'
+          #include <stdarg.h>
+          int __android_log_print (int p, const char *t, const char *f, ...) { (void)p;(void)t;(void)f; return 0; }
+          int __android_log_vprint (int p, const char *t, const char *f, va_list a) { (void)p;(void)t;(void)f;(void)a; return 0; }
+          void __android_log_write (int p, const char *t, const char *x) { (void)p;(void)t;(void)x; }
+          void __android_log_buf_write (int b, int p, const char *t, const char *x) { (void)b;(void)p;(void)t;(void)x; }
+          EOF
+
+      - name: Link JNI wrapper against official library
+        run: |
+          NDKBIN=$PWD/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$NDKBIN/aarch64-linux-android24-clang
+          $CC -shared -fPIC -O2 -Isrc -o libhev.so hev-jni.c logstub.c -Llibs/arm64-v8a -lhev-socks5-tunnel -llog
+          ls -lh libhev.so
           mkdir -p out
-          cp "$SRC" out/libhev.so
-          ls -lh out/
+          cp libhev.so out/
+          cp libs/arm64-v8a/libhev-socks5-tunnel.so out/libhev-socks5-tunnel.so
+
+      - name: Verify JNI symbols
+        run: |
+          NDKBIN=$PWD/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin
+          $NDKBIN/llvm-nm -D libhev.so | grep Java_
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: libhev-android
-          path: out/libhev.so
+          path: out/
