@@ -60,8 +60,9 @@ jobs:
           find . -name Makefile -exec sed -i 's/-O2/-O2 -fPIC/g' {} +
           # -lpthread غير موجودة في bionic (pthread داخل libc) — نحذفها من الربط
           sed -i 's/-lpthread//g' Makefile
+          # STRIP=true: نتخطى أداة strip (لينكس) على ملف أندرويد — تجميلية فقط
           make clean
-          make CC="$CC"
+          make CC="$CC" STRIP=true
 
       - name: Link as shared library
         run: |
