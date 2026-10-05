@@ -50,19 +50,21 @@ jobs:
           void __android_log_buf_write (int b, int p, const char *t, const char *x) { (void)b;(void)p;(void)t;(void)x; }
           EOF
 
-      - name: Build with NDK (fPIC)
+      - name: Build with NDK (fPIC wrapper)
         run: |
           NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          CC=$NDKBIN/aarch64-linux-android24-clang
           # fd_set: bionic يوفره أصلاً — نُبطل تعريف lwip المتعارض
           find third-part/lwip -name cc.h -exec sed -i 's|typedef __kernel_fd_set fd_set;|/* fd_set: provided by bionic */|' {} +
-          # -fPIC لكل Makefiles (الرئيسي + lwip + yaml + task-system)
-          find . -name Makefile -exec sed -i 's/-O2/-O2 -fPIC/g' {} +
-          # -lpthread غير موجودة في bionic (pthread داخل libc) — نحذفها من الربط
+          # -lpthread غير موجودة في bionic — نحذفها من الربط
           sed -i 's/-lpthread//g' Makefile
-          # STRIP=true: نتخطى أداة strip (لينكس) على ملف أندرويد — تجميلية فقط
+          # ⬇️ غلاف المترجم: يحقن -fPIC في كل استدعاء (نفس الحل الذي نجح في Termux) ⬇️
+          cat > clang-pic <<EOF
+          #!/bin/bash
+          exec $NDKBIN/aarch64-linux-android24-clang -fPIC "\$@"
+          EOF
+          chmod +x clang-pic
           make clean
-          make CC="$CC" STRIP=true
+          make CC=./clang-pic STRIP=true
 
       - name: Link as shared library
         run: |
@@ -72,8 +74,7 @@ jobs:
           $CC -fPIC -O2 -c logstub.c -o logstub.o
           OBJS=$(find build -name '*.o' ! -name 'main.o' | tr '\n' ' ')
           echo "objects: $(echo $OBJS | wc -w)"
-          ls -l third-part/lwip/bin/liblwip.a third-part/yaml/bin/libyaml.a third-part/hev-task-system/bin/libhev-task-system.a
-          # الربط بالأرشيفات الرسمية — كما يفعل Makefile الرسمي (صفر تكرارات)
+          # الربط بالأرشيفات الرسمية — صفر تكرارات
           $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS \
             third-part/lwip/bin/liblwip.a \
             third-part/yaml/bin/libyaml.a \
