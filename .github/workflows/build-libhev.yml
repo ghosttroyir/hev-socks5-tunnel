@@ -57,7 +57,12 @@ jobs:
           find third-part/lwip -name cc.h -exec sed -i 's|typedef __kernel_fd_set fd_set;|/* fd_set: provided by bionic */|' {} +
           # -lpthread غير موجودة في bionic — نحذفها من الربط
           sed -i 's/-lpthread//g' Makefile
-          # ⬇️ الغلاف بمسار مطلق + printf نظيف (بدون مسافات زائدة داخل السكربت) ⬇️
+          # ⬇️ إصلاح: امسح SYNC_STOP قبل فحص run (تشغيلات متتالية بنفس العملية) ⬇️
+          sed -i 's|if (atomic_fetch_and (&tsync, ~SYNC_STOP) & SYNC_STOP)|LOG_D ("RUN-CHECK");\n    atomic_fetch_and (\&tsync, ~SYNC_STOP);\n    if (atomic_fetch_and (\&tsync, ~SYNC_STOP) \& SYNC_STOP)|' src/hev-socks5-tunnel.c
+          # ⬇️ بصمات: هل وصلنا للمجدول؟ وهل عاد فوراً؟ ⬇️
+          sed -i 's|WRITE_ONCE (run, 1);|WRITE_ONCE (run, 1);\n    LOG_D ("SCHED-ENTER");|' src/hev-socks5-tunnel.c
+          sed -i 's|hev_task_system_run ();|hev_task_system_run ();\n    LOG_D ("SCHED-EXIT");|' src/hev-socks5-tunnel.c
+          # ⬇️ غلاف المترجم بمسار مطلق — يحقن -fPIC في كل استدعاء ⬇️
           printf '#!/bin/bash\nexec %s -fPIC "$@"\n' "$NDKBIN/aarch64-linux-android24-clang" > "$HOME/clang-pic"
           chmod +x "$HOME/clang-pic"
           make clean
@@ -71,7 +76,6 @@ jobs:
           $CC -fPIC -O2 -c logstub.c -o logstub.o
           OBJS=$(find build -name '*.o' ! -name 'main.o' | tr '\n' ' ')
           echo "objects: $(echo $OBJS | wc -w)"
-          # الربط بالأرشيفات الرسمية — صفر تكرارات
           $CC -shared -o libhev.so hev-jni.o logstub.o $OBJS \
             third-part/lwip/bin/liblwip.a \
             third-part/yaml/bin/libyaml.a \
@@ -85,6 +89,10 @@ jobs:
         run: |
           NDKBIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
           $NDKBIN/llvm-nm -D libhev.so | grep Java_
+
+      - name: Verify diagnostics applied
+        run: |
+          grep -n "RUN-CHECK\|SCHED-ENTER\|SCHED-EXIT" src/hev-socks5-tunnel.c
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
